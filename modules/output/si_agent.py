@@ -125,8 +125,8 @@ def group_tables_by_domain(
 
     # --- 4. Fallback: single domain ---
     if domains is None:
-        source = inventory.get("source_type", "Data").replace("_", " ").title()
-        domains = {source: sorted(all_tables)}
+        domain_name = _infer_domain_name(inventory)
+        domains = {domain_name: sorted(all_tables)}
 
     # --- 5. Cross-domain bridge detection ---
     # Runs after any of the above strategies.  Detects FK paths between
@@ -676,9 +676,47 @@ def _clean_domain_name(page_name: str) -> str:
     return name or page_name
 
 
-# ---------------------------------------------------------------------------
-# Tool description generation
-# ---------------------------------------------------------------------------
+def _infer_domain_name(inventory: dict) -> str:
+    """Derive a meaningful single-domain name from inventory metadata.
+
+    Priority:
+    1. Datasource caption (e.g. ``"BoD Plan+ (Multiple Connections)"`` → ``"Bod Plan"``)
+    2. Most common dashboard-name prefix word(s) shared across dashboards
+    3. source_type title-cased (last resort — avoids the generic "Tableau" label)
+    """
+    # 1. Try datasource caption from tables metadata
+    for table in inventory.get("tables", []):
+        caption = (table.get("connection") or {}).get("caption", "") or table.get("caption", "")
+        if caption and caption.strip():
+            # Strip parenthetical suffixes like "(Multiple Connections)"
+            clean = re.sub(r'\s*\([^)]*\)', '', caption).strip()
+            # Convert to title-case identifier (max 3 words)
+            words = re.findall(r'[A-Za-z]+', clean)[:3]
+            if words:
+                return " ".join(w.title() for w in words)
+
+    # 2. Try to find a common prefix across dashboard names
+    dash_names = [d.get("name", "") for d in inventory.get("dashboards", []) if d.get("name")]
+    if dash_names:
+        # Split each name into words, find words common to >50% of dashboards
+        from collections import Counter
+        word_counts: Counter = Counter()
+        for dn in dash_names:
+            for w in re.findall(r'[A-Za-z]{3,}', dn):
+                word_counts[w.title()] += 1
+        threshold = max(2, len(dash_names) // 2)
+        common = [w for w, c in word_counts.most_common(2) if c >= threshold]
+        # Filter out generic terms
+        generic = {"Dashboard", "Bookings", "Summary", "Sales", "Report", "Data"}
+        meaningful = [w for w in common if w not in generic]
+        if meaningful:
+            return " ".join(meaningful)
+
+    # 3. Fallback to source_type (e.g. "powerbi" → "Power Bi")
+    source = inventory.get("source_type", "Analytics")
+    return source.replace("_", " ").title()
+
+
 
 def _is_cross_domain(domain_name: str) -> bool:
     """Return True if *domain_name* is a cross-domain combined view."""

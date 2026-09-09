@@ -105,14 +105,22 @@ def generate_semantic_view_yaml(
 
     # --- Dimensions ---
     dims = inventory.get("dimensions", [])
-    eligible_dims = [d for d in dims if d.get("complexity") != "manual_required" or include_flagged]
+    eligible_dims = [
+        d for d in dims
+        if (d.get("complexity") != "manual_required" or include_flagged)
+        and _sanitize_name(d.get("name", "")) not in ("", "UNKNOWN")  # skip unnamed proxy fields
+    ]
     if eligible_dims:
         lines.append("dimensions:")
+        seen_dim_names: set[str] = set()
         for dim in eligible_dims:
             is_manual = dim.get("complexity") == "manual_required"
             prefix = "  # " if is_manual else "  "
 
             name = _sanitize_name(dim.get("name", "UNKNOWN"))
+            if name in seen_dim_names:
+                continue  # deduplicate fields with identical sanitized names
+            seen_dim_names.add(name)
             expr = dim.get("expr", "")
             dt = dim.get("data_type", "VARCHAR")
             desc = dim.get("description", "")
@@ -122,7 +130,7 @@ def generate_semantic_view_yaml(
             if syns:
                 syn_str = ", ".join(f'"{s}"' for s in syns[:5])
                 lines.append(f"{prefix}  synonyms: [{syn_str}]")
-            lines.append(f"{prefix}  expr: {_format_expr(expr, dim.get('table', ''))}")
+            lines.append(f"{prefix}  expr: {_format_expr(expr, dim.get('table', ''), name)}")
             lines.append(f"{prefix}  data_type: {dt}")
             if desc:
                 lines.append(f"{prefix}  description: \"{_escape_yaml_string(desc)}\"")
@@ -135,14 +143,22 @@ def generate_semantic_view_yaml(
 
     # --- Facts ---
     facts = inventory.get("facts", [])
-    eligible_facts = [f for f in facts if f.get("complexity") != "manual_required" or include_flagged]
+    eligible_facts = [
+        f for f in facts
+        if (f.get("complexity") != "manual_required" or include_flagged)
+        and _sanitize_name(f.get("name", "")) not in ("", "UNKNOWN")  # skip unnamed proxy fields
+    ]
     if eligible_facts:
         lines.append("facts:")
+        seen_fact_names: set[str] = set()
         for fact in eligible_facts:
             is_manual = fact.get("complexity") == "manual_required"
             prefix = "  # " if is_manual else "  "
 
             name = _sanitize_name(fact.get("name", "UNKNOWN"))
+            if name in seen_fact_names:
+                continue  # deduplicate fields with identical sanitized names
+            seen_fact_names.add(name)
             expr = fact.get("expr", "")
             dt = fact.get("data_type", "NUMBER")
             desc = fact.get("description", "")
@@ -152,7 +168,7 @@ def generate_semantic_view_yaml(
             if syns:
                 syn_str = ", ".join(f'"{s}"' for s in syns[:5])
                 lines.append(f"{prefix}  synonyms: [{syn_str}]")
-            lines.append(f"{prefix}  expr: {_format_expr(expr, fact.get('table', ''))}")
+            lines.append(f"{prefix}  expr: {_format_expr(expr, fact.get('table', ''), name)}")
             lines.append(f"{prefix}  data_type: {dt}")
             if desc:
                 lines.append(f"{prefix}  description: \"{_escape_yaml_string(desc)}\"")
@@ -177,7 +193,7 @@ def generate_semantic_view_yaml(
             if syns:
                 syn_str = ", ".join(f'"{s}"' for s in syns[:5])
                 lines.append(f"{prefix}  synonyms: [{syn_str}]")
-            lines.append(f"{prefix}  expr: {_format_expr(expr, metric.get('table', ''))}")
+            lines.append(f"{prefix}  expr: {_format_expr(expr, metric.get('table', ''), name)}")
             lines.append(f"{prefix}  data_type: {dt}")
             if desc:
                 lines.append(f"{prefix}  description: \"{_escape_yaml_string(desc)}\"")
@@ -341,9 +357,19 @@ def _escape_yaml_string(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-def _format_expr(expr: str, table: str) -> str:
-    """Format an expression, ensuring table prefix if simple column ref."""
+def _format_expr(expr: str, table: str, name: str = "") -> str:
+    """Format an expression, ensuring table prefix if simple column ref.
+
+    When ``expr`` is empty (e.g. Tableau sqlproxy / Published Data Sources
+    where physical column references are not embedded in the .twb), fall back
+    to the sanitized field ``name`` as the column reference rather than the
+    generic placeholder ``UNKNOWN``.  This produces a usable YAML that maps
+    naturally when Snowflake column names match the Tableau field captions.
+    """
     if not expr:
+        if name:
+            col = _sanitize_name(name)
+            return f"{table}.{col}" if table else col
         return f"{table}.UNKNOWN" if table else "UNKNOWN"
     # If it's just a column name, prefix with table
     if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', expr.strip()) and table:

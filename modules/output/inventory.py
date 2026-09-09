@@ -77,14 +77,23 @@ def build_unified_inventory(
             if c in inventory["complexity_summary"]:
                 inventory["complexity_summary"][c] += 1
 
+    # Preserve dashboard and worksheet structure from the parser so downstream
+    # consumers (enrich-charts, generate-streamlit, generate-react, build-agent)
+    # can use the full dashboard/worksheet topology.  The builder functions above
+    # only populate dimensions/facts/metrics — they never write these keys.
+    inventory["dashboards"] = parsed_data.get("dashboards", [])
+    inventory["worksheets"] = parsed_data.get("worksheets", [])
+
     log.info(
         "Unified inventory built: %d tables, %d dimensions, %d facts, %d metrics, "
-        "%d flagged, complexity=%s",
+        "%d flagged, %d dashboards, %d worksheets, complexity=%s",
         len(inventory["tables"]),
         len(inventory["dimensions"]),
         len(inventory["facts"]),
         len(inventory["metrics"]),
         len(inventory["flagged"]),
+        len(inventory["dashboards"]),
+        len(inventory["worksheets"]),
         inventory["complexity_summary"],
     )
 
