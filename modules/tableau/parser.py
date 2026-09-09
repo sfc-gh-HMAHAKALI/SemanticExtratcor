@@ -681,9 +681,21 @@ def _collect_zone_worksheets(db_el: ET.Element) -> list[str]:
                 if name and name not in seen:
                     seen.add(name)
                     sheet_names.append(name)
-            # Some encodings use a 'param' attribute for the worksheet name
+            # Some zones use the 'name' attr without type='worksheet'
+            # but still reference a real worksheet (when name is a plain string)
+            name = zone.get("name", "")
+            if name and name not in seen and "[" not in name:
+                seen.add(name)
+                sheet_names.append(name)
+            # 'param' may hold worksheet names in some zone types, but
+            # skip anything that looks like a field reference (contains '[')
+            # or a file path (contains '/' or '\')
             param = zone.get("param", "")
-            if param and param not in seen:
+            if (param and param not in seen
+                    and "[" not in param
+                    and "/" not in param
+                    and "\\" not in param
+                    and not param.endswith((".jpg", ".jpeg", ".png", ".gif", ".svg"))):
                 seen.add(param)
                 sheet_names.append(param)
             _walk_zones(zone)
