@@ -636,19 +636,44 @@ def _from_cognos(parsed: dict, inv: dict) -> None:
 
     sf_db = inv["snowflake_target"]["database"]
 
-    # Prefer the physical layer. Fall back to the model layer for subjects that
-    # exist only there.
+    # Prefer the physical layer for the physical binding, but carry the model
+    # layer's filters forward. Neither layer alone is complete: Import View knows
+    # which table an entity reads, Model View knows which rows the model keeps.
+    # Replacing one with the other loses half the definition.
     by_name: dict[str, dict] = {}
     for qs in parsed.get("query_subjects", []):
         name = qs.get("name", "")
         if not name:
             continue
         existing = by_name.get(name)
-        if existing is None or (
+        if existing is None:
+            by_name[name] = dict(qs)
+            continue
+        physical_wins = (
             existing.get("namespace") != "Import View"
             and qs.get("namespace") == "Import View"
-        ):
-            by_name[name] = qs
+        )
+        keep, other = (qs, existing) if physical_wins else (existing, qs)
+        merged = dict(keep)
+        # Union the filters from both layers, deduplicated on expression.
+        seen_exprs = {f.get("expression") for f in merged.get("filters", [])}
+        for f in other.get("filters", []):
+            if f.get("expression") not in seen_exprs:
+                merged.setdefault("filters", []).append(f)
+                seen_exprs.add(f.get("expression"))
+        # A filter anywhere in the stack means the entity is not a passthrough.
+        if merged.get("filters"):
+            merged["is_passthrough"] = False
+        for key in ("physical_object", "source_alias", "table_type", "data_source"):
+            if not merged.get(key) and other.get(key):
+                merged[key] = other[key]
+        merged["wraps_entities"] = list(
+            dict.fromkeys((keep.get("wraps_entities") or []) + (other.get("wraps_entities") or []))
+        )
+        merged["security_filter_count"] = max(
+            keep.get("security_filter_count", 0), other.get("security_filter_count", 0)
+        )
+        by_name[name] = merged
 
     # Tables
     for name, qs in by_name.items():
@@ -669,6 +694,9 @@ def _from_cognos(parsed: dict, inv: dict) -> None:
                 "is_passthrough": qs.get("is_passthrough", False),
                 "sql": qs.get("sql", ""),
                 "status": qs.get("status", ""),
+                "wraps_entities": qs.get("wraps_entities", []),
+                "entity_filters": qs.get("filters", []),
+                "security_filter_count": qs.get("security_filter_count", 0),
             }
         )
 
@@ -814,8 +842,44 @@ def _from_cognos(parsed: dict, inv: dict) -> None:
                 "name": f.get("name", ""),
                 "expression": f.get("expression", ""),
                 "source_view": f.get("namespace", ""),
+                "entity": "",
+                "scope": "model",
             }
         )
+
+    # Filters attached to a query subject are part of that entity's definition,
+    # not decoration. The reference model's Model View layer restricts DIM_TIME to
+    # FINC_YR_ID >= 2018 and DAY_DT < current_date, and FACT_SALES_SUMMARY to
+    # PROCESSED_DATE <= CURRENT_DATE. A conversion that drops them returns rows
+    # the source model excludes, so totals will not reconcile against Cognos and
+    # the difference will look like a data problem rather than a missing filter.
+    # Iterate the merged entities, not the raw query subjects: the same filter is
+    # declared on both the Import View and Model View copy of an entity, and
+    # emitting it twice would double-count the remediation work.
+    for qs in by_name.values():
+        for f in qs.get("filters", []):
+            inv["filters"].append(
+                {
+                    "name": f.get("name", "") or f"{qs.get('name', '')} filter",
+                    "expression": f.get("expression", ""),
+                    "source_view": qs.get("namespace", ""),
+                    "entity": qs.get("name", ""),
+                    "scope": "entity",
+                    "application": f.get("application", ""),
+                    "apply": f.get("apply", ""),
+                }
+            )
+            inv["flagged"].append(
+                {
+                    "name": f"{qs.get('name', '')}: {f.get('name', '') or 'filter'}",
+                    "table": qs.get("name", ""),
+                    "reason": (
+                        "entity carries a model-layer filter that must be reproduced; "
+                        "omitting it widens the row set relative to the source model"
+                    ),
+                    "expression": f.get("expression", ""),
+                }
+            )
 
 
 # ---------------------------------------------------------------------------

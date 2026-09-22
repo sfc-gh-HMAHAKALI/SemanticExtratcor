@@ -185,17 +185,50 @@ _PASSTHROUGH_RE = re.compile(
 )
 
 
-def _classify_sql(sql: str) -> tuple[bool, str, str]:
-    """Return (is_passthrough, source_ref, physical_object) for a dbQuery SQL.
+def _sql_parts(sql_elem: ET.Element | None) -> dict[str, Any]:
+    """Extract the structured parts of a Cognos ``<sql>`` element.
 
-    ``source_ref`` is the Cognos data source alias; ``physical_object`` is the
-    table or view name. For non-passthrough SQL both are empty and the caller
-    should treat the query subject as carrying embedded logic.
+    Framework Manager marks up the SQL rather than storing it as flat text::
+
+        <sql type="cognos">Select <column>*</column>from<table>[CONN].FACT_X</table></sql>
+
+    Reading the ``<table>`` and ``<column>`` children is both more reliable and
+    cheaper than regex-matching the reconstructed string -- and necessary here,
+    because ``itertext`` concatenates without whitespace, producing ``*from`` and
+    defeating any ``SELECT \\* FROM`` pattern. Some subjects store plain text
+    instead, so the text path is retained as a fallback.
+    """
+    if sql_elem is None:
+        return {"text": "", "tables": [], "columns": [], "tagged": False}
+    tables = [_text(t) for t in sql_elem.iter() if _tag(t) == "table" and _text(t)]
+    columns = [_text(c) for c in sql_elem.iter() if _tag(c) == "column" and _text(c)]
+    return {
+        "text": _text(sql_elem),
+        "tables": tables,
+        "columns": columns,
+        "tagged": bool(tables or columns),
+    }
+
+
+def _classify_sql(sql: str) -> tuple[bool, str, str]:
+    """Return (is_passthrough, source_ref, physical_object) for plain-text SQL.
+
+    Fallback for query subjects that store SQL as text rather than as tagged
+    markup. ``_sql_parts`` handles the tagged form.
     """
     m = _PASSTHROUGH_RE.match(sql or "")
     if not m:
         return False, "", ""
     return True, m.group(2), m.group(3)
+
+
+def _split_qualified(ref: str) -> tuple[str, str]:
+    """Split ``[CONN].SCHEMA_OR_TABLE`` into (connection_alias, object)."""
+    ref = (ref or "").strip()
+    m = re.match(r"^\[?([\w$]+)\]?\.(.+)$", ref)
+    if not m:
+        return "", ref
+    return m.group(1), m.group(2).strip().strip("[]")
 
 
 def _parse_query_item(qi: ET.Element, owner: str, namespace: str) -> dict[str, Any]:
@@ -278,9 +311,14 @@ def _parse_query_subject(qs: ET.Element, namespace: str) -> dict[str, Any]:
     data_source = ""
     table_type = ""
     kind = "model"
+    src_alias = ""
+    physical = ""
+    wraps: list[str] = []
+    container = None
+
     if db_query is not None:
         kind = "db"
-        sql = _text(_child(db_query, "sql"))
+        container = db_query
         table_type = _text(_child(db_query, "tableType"))
         sources = _child(db_query, "sources")
         if sources is not None:
@@ -293,9 +331,65 @@ def _parse_query_subject(qs: ET.Element, namespace: str) -> dict[str, Any]:
                 data_source = parse_refobj(ds_refs[0])["item"]
     elif model_query is not None:
         kind = "model"
-        sql = _text(_child(model_query, "sql"))
+        container = model_query
 
-    is_passthrough, src_alias, physical = _classify_sql(sql)
+    if container is not None:
+        parts = _sql_parts(_child(container, "sql"))
+        sql = parts["text"]
+        if parts["tables"]:
+            # Tagged form: the <table> child names the physical object outright.
+            src_alias, physical = _split_qualified(parts["tables"][0])
+            is_passthrough = parts["columns"] == ["*"] and len(parts["tables"]) == 1
+        elif parts["tagged"]:
+            # Tagged but with an empty <table/>: a model-layer subject that wraps
+            # another query subject rather than reading a physical table.
+            is_passthrough = parts["columns"] == ["*"]
+        else:
+            is_passthrough, src_alias, physical = _classify_sql(sql)
+    else:
+        is_passthrough = False
+
+    # Model-layer subjects declare what they wrap through their items' refobjs.
+    if kind == "model":
+        for qi in _children(qs, "queryItem"):
+            expr = _child(qi, "expression")
+            if expr is None:
+                continue
+            for r in _refobjs(expr):
+                obj = parse_refobj(r)["object"]
+                if obj and obj != name and obj not in wraps:
+                    wraps.append(obj)
+
+    # Filters attached to the query subject itself. These are real model logic --
+    # the model-layer FACT_SALES_SUMMARY carries PROCESSED_DATE <= CURRENT_DATE --
+    # so a conversion that ignores them silently widens the row set.
+    filters: list[dict[str, Any]] = []
+    for holder in (container, qs):
+        if holder is None:
+            continue
+        fl = _child(holder, "filters")
+        if fl is None:
+            continue
+        for fd in _children(fl, "filterDefinition"):
+            filters.append(
+                {
+                    "name": _text(_child(fd, "displayName")),
+                    "expression": _text(_child(fd, "expression")),
+                    "application": fd.get("application", ""),
+                    "apply": fd.get("apply", ""),
+                }
+            )
+
+    # Security filters declared on this subject name the entity being protected,
+    # which the global filter population does not -- the predicates reference the
+    # territory table, not the fact table they guard.
+    protected_by: list[str] = []
+    sec = _child(qs, "securityFilters")
+    if sec is not None and _children(sec, "securityFilterDefinition"):
+        protected_by = [
+            _text(_child(sf, "displayName"))
+            for sf in _children(sec, "securityFilterDefinition")
+        ]
 
     items = [
         _parse_query_item(qi, name, namespace)
@@ -309,10 +403,14 @@ def _parse_query_subject(qs: ET.Element, namespace: str) -> dict[str, Any]:
         "kind": kind,
         "sql": sql,
         "data_source": data_source,
-        "source_alias": src_alias,
+        "source_alias": src_alias or data_source,
         "physical_object": physical,
+        "wraps_entities": wraps,
         "table_type": table_type,
-        "is_passthrough": is_passthrough,
+        "is_passthrough": bool(is_passthrough) and not filters,
+        "filters": filters,
+        "has_security_filters": bool(protected_by),
+        "security_filter_count": len(protected_by),
         "items": items,
         "determinants": _parse_determinants(qs, name),
         "last_changed": _text(_child(qs, "lastChanged")),
