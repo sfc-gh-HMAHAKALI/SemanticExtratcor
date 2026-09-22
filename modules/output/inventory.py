@@ -670,6 +670,18 @@ def _from_cognos(parsed: dict, inv: dict) -> None:
         merged["wraps_entities"] = list(
             dict.fromkeys((keep.get("wraps_entities") or []) + (other.get("wraps_entities") or []))
         )
+        # Union the query items as well. The Model View layer adds items that the
+        # Import View does not have -- in the reference model DIM_TIME gains a
+        # calculated "Date" item there, and that is the column the fact-to-date
+        # relationships actually join on. Keeping only the physical layer's items
+        # silently drops the join key and leaves the relationship unresolvable.
+        merged_items = list(keep.get("items") or [])
+        have = {i.get("name") for i in merged_items}
+        for i in other.get("items") or []:
+            if i.get("name") not in have:
+                merged_items.append(i)
+                have.add(i.get("name"))
+        merged["items"] = merged_items
         merged["security_filter_count"] = max(
             keep.get("security_filter_count", 0), other.get("security_filter_count", 0)
         )
