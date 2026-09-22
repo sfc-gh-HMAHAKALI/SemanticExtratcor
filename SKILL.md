@@ -1,26 +1,27 @@
 ---
 name: semantic-extraction
-description: "Extract semantic definitions from Tableau, Looker, Power BI, Denodo, and/or SAP Business Objects and convert them to Snowflake Semantic View YAML, HTML reports, and Excel workbooks. Use when: migrating from Tableau/Looker/Power BI/Denodo/Business Objects to Snowflake semantic layer, auditing BI semantic inventory, extracting dashboard metadata, generating semantic view YAML from BI tools. Triggers: tableau extraction, looker extraction, power bi extraction, powerbi, pbix, DAX, semantic extraction, BI migration, LookML to semantic view, tableau to snowflake, power bi to snowflake, denodo extraction, denodo to snowflake, VQL, business objects extraction, SAP BO, universe extraction, .unv, .unx, semantic audit, dashboard inventory, BI semantic mapping, seed data, sample data, synthetic data, si agent, snowflake intelligence agent, cortex agent from BI, generate agent, SI artifacts."
+description: "Extract semantic definitions from Tableau, Looker, Power BI, Denodo, SAP Business Objects, and/or IBM Cognos Framework Manager and convert them to Snowflake Semantic View YAML, HTML reports, and Excel workbooks. Use when: migrating from Tableau/Looker/Power BI/Denodo/Business Objects/Cognos to Snowflake semantic layer, auditing BI semantic inventory, extracting dashboard metadata, generating semantic view YAML from BI tools. Triggers: tableau extraction, looker extraction, power bi extraction, powerbi, pbix, DAX, semantic extraction, BI migration, LookML to semantic view, tableau to snowflake, power bi to snowflake, denodo extraction, denodo to snowflake, VQL, business objects extraction, SAP BO, universe extraction, .unv, .unx, cognos extraction, cognos framework manager, framework manager, model.xml, .cpf, cognos to snowflake, determinants, semi-additive aggregation, cognos migration, semantic audit, dashboard inventory, BI semantic mapping, seed data, sample data, synthetic data, si agent, snowflake intelligence agent, cortex agent from BI, generate agent, SI artifacts."
 ---
 
 # Semantic Extraction
 
-Extract semantic definitions from **Tableau**, **Looker**, **Power BI**, **Denodo**, and/or **SAP Business Objects**, audit the full BI landscape, and produce Snowflake Semantic View YAML + a mapping file (Excel + JSON).
+Extract semantic definitions from **Tableau**, **Looker**, **Power BI**, **Denodo**, **SAP Business Objects**, and/or **IBM Cognos Framework Manager**, audit the full BI landscape, and produce Snowflake Semantic View YAML + a mapping file (Excel + JSON).
 
 ## When to Use
 
-- Migrating from Tableau/Looker/Power BI/Denodo/Business Objects to Snowflake's semantic layer
+- Migrating from Tableau/Looker/Power BI/Denodo/Business Objects/Cognos to Snowflake's semantic layer
 - Auditing all dashboards, metrics, and calculated fields across a BI estate
 - Generating the mapping/documentation artifact for a migration engagement
 - Extracting from Looker/LookML (Snowflake Autopilot does not support Looker)
 - Extracting from Power BI / DAX models (Autopilot does not support Power BI)
 - Extracting from Denodo data virtualization layers (Autopilot does not support Denodo)
 - Extracting from SAP Business Objects universes (Autopilot does not support BO)
+- Extracting from IBM Cognos Framework Manager projects (Autopilot does not support Cognos)
 - Large-scale Tableau extraction (Autopilot is manual, one workbook at a time)
 
 ## Relationship to Snowflake Semantic View Autopilot
 
-Snowflake's **Semantic View Autopilot** can ingest Tableau `.twb`/`.tds`/`.twbx` files directly in Snowsight UI — but it is manual (one workbook at a time), does not support Looker, Power BI, Denodo, or Business Objects, and does not produce a mapping/audit artifact.
+Snowflake's **Semantic View Autopilot** can ingest Tableau `.twb`/`.tds`/`.twbx` files directly in Snowsight UI — but it is manual (one workbook at a time), does not support Looker, Power BI, Denodo, Business Objects, or Cognos, and does not produce a mapping/audit artifact.
 
 This skill complements Autopilot:
 - **Audit ALL sources first** → produce the mapping file → **qualify** what to migrate
@@ -28,6 +29,7 @@ This skill complements Autopilot:
 - **Power BI**: Generate YAML directly (no Autopilot path)
 - **Denodo**: Generate YAML directly (no Autopilot path) — infers dim/measure from heuristics since Denodo has no native classification
 - **Business Objects**: Generate YAML directly (no Autopilot path) — leverages BO's native Dimension/Detail/Measure object types
+- **Cognos**: Generate YAML directly (no Autopilot path) — leverages Cognos's native `usage` declaration (fact/identifier/attribute), plus determinants, regular/semiAggregate pairs, hierarchy levels and security filters that no other supported source exposes
 - **Tableau**: After qualification, use Autopilot for individual `.twb` files or generate YAML here
 - **Multi-tool**: Unified extraction + documentation across all five BI tools
 
@@ -90,6 +92,7 @@ Which BI tool(s) are we extracting from?
 3. Power BI only
 4. Denodo only
 5. SAP Business Objects only
+6. IBM Cognos only
 6. Multiple tools (any combination of the above)
 
 How will we access the content?
@@ -114,7 +117,7 @@ Recommend Autopilot as the simpler path. Continue with this skill only if the us
 **For all file-based sources**, use the Python modules to crawl and validate:
 ```bash
 # Discover source files
-python -m modules.cli crawl /path/to/source/files --type <tableau|looker|powerbi|denodo|businessobjects>
+python -m modules.cli crawl /path/to/source/files --type <tableau|looker|powerbi|denodo|businessobjects|cognos>
 ```
 This returns a JSON file list with paths, sizes, and detected types. Review with the user.
 

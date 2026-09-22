@@ -794,6 +794,9 @@ def _run_parser(path: str, source_type: str) -> dict:
         parsed = load_bo_json(path)
         from modules.businessobjects.parser import extract_bo_inventory
         return extract_bo_inventory(parsed)
+    elif source_type == "cognos":
+        from modules.cognos.parser import parse_framework_manager_model
+        return parse_framework_manager_model(path)
     else:
         raise ExtractionError(f"Unknown source type: {source_type}")
 
@@ -813,6 +816,9 @@ def _get_classifier(source_type: str):
         elif source_type == "denodo":
             from modules.denodo.classifier import classify_denodo_complexity
             return lambda item: classify_denodo_complexity(item)
+        elif source_type == "cognos":
+            from modules.cognos.classifier import classify_cognos_complexity
+            return lambda item: classify_cognos_complexity(item)
         elif source_type == "businessobjects":
             from modules.businessobjects.classifier import classify_bo_complexity
             return lambda item: classify_bo_complexity(
@@ -1154,7 +1160,7 @@ def main():
     p_crawl = subparsers.add_parser("crawl", help="Discover source files.")
     p_crawl.add_argument("path", help="Directory to crawl.")
     p_crawl.add_argument("--type", required=True,
-                         choices=["tableau", "looker", "powerbi", "denodo", "businessobjects"],
+                         choices=["tableau", "looker", "powerbi", "denodo", "businessobjects", "cognos"],
                          help="Source type to filter for.")
     p_crawl.add_argument("--max-depth", type=int, default=10)
     p_crawl.add_argument("--follow-symlinks", action="store_true")
@@ -1164,7 +1170,7 @@ def main():
     p_parse.add_argument("path", nargs="?", default="",
                          help="File or directory to parse (required for --mode file).")
     p_parse.add_argument("--type", required=True,
-                         choices=["tableau", "looker", "powerbi", "denodo", "businessobjects"])
+                         choices=["tableau", "looker", "powerbi", "denodo", "businessobjects", "cognos"])
     p_parse.add_argument("--mode", choices=["file", "server"], default="file",
                          help="Parse local files or connect to a live server (default: file).")
     p_parse.add_argument("--config",
@@ -1189,7 +1195,7 @@ def main():
     # --- test-connection ---
     p_test = subparsers.add_parser("test-connection", help="Test source connectivity.")
     p_test.add_argument("--type", required=True,
-                        choices=["tableau", "looker", "powerbi", "denodo", "businessobjects"])
+                        choices=["tableau", "looker", "powerbi", "denodo", "businessobjects", "cognos"])
     p_test.add_argument("--config", required=True, help="JSON config file with credentials.")
 
     # --- report ---

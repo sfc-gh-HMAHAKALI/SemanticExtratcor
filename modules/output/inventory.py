@@ -43,6 +43,24 @@ def build_unified_inventory(
         "metrics": [],
         "filters": [],
         "flagged": [],
+        # Four source-agnostic modelling concepts that the original five
+        # adapters had nowhere to put. They are additive: an adapter that does
+        # not populate them leaves them empty, so nothing downstream breaks.
+        #
+        # grain_declarations  - Cognos determinants, Power BI table grain,
+        #                       Tableau LOD context. Needed to know whether a
+        #                       SUM can double-count across a join.
+        # aggregation_rules   - the (regular, rollup) pair. A rollup that differs
+        #                       from the regular aggregate is semi-additive and
+        #                       is not expressible as one SQL aggregate.
+        # hierarchies         - named drill paths with ordered levels, so a
+        #                       front end can present a tree without a developer
+        #                       hand-coding it.
+        # security_rules      - row-filter intent plus the principal it binds to.
+        "grain_declarations": [],
+        "aggregation_rules": [],
+        "hierarchies": [],
+        "security_rules": [],
         "complexity_summary": {
             "simple": 0,
             "needs_translation": 0,
@@ -58,6 +76,7 @@ def build_unified_inventory(
             "powerbi": _from_powerbi,
             "denodo": _from_denodo,
             "businessobjects": _from_businessobjects,
+            "cognos": _from_cognos,
         }
         builder = router.get(source_type)
         if builder is None:
@@ -118,11 +137,18 @@ def merge_inventories(inventories: list[dict]) -> dict:
         "metrics": [],
         "filters": [],
         "flagged": [],
+        "grain_declarations": [],
+        "aggregation_rules": [],
+        "hierarchies": [],
+        "security_rules": [],
         "complexity_summary": {"simple": 0, "needs_translation": 0, "manual_required": 0},
         "errors": [],
     }
 
     seen_tables: set[str] = set()
+    # Track which source each merged inventory came from, so a multi-tool merge
+    # (a Cognos model plus a Power BI model) stays attributable downstream.
+    merged["source_types"] = [inv.get("source_type", "unknown") for inv in inventories]
 
     for inv in inventories:
         for table in inv.get("tables", []):
@@ -138,6 +164,8 @@ def merge_inventories(inventories: list[dict]) -> dict:
         merged["filters"].extend(inv.get("filters", []))
         merged["flagged"].extend(inv.get("flagged", []))
         merged["errors"].extend(inv.get("errors", []))
+        for key in ("grain_declarations", "aggregation_rules", "hierarchies", "security_rules"):
+            merged[key].extend(inv.get(key, []))
 
         for k in ("simple", "needs_translation", "manual_required"):
             merged["complexity_summary"][k] += inv.get("complexity_summary", {}).get(k, 0)
@@ -585,6 +613,209 @@ def _from_businessobjects(parsed: dict, inv: dict) -> None:
                 "reason": obj.get("flag_reason", "complex_expression"),
                 "expression": obj.get("select_expression", ""),
             })
+
+
+def _from_cognos(parsed: dict, inv: dict) -> None:
+    """Normalize Cognos Framework Manager parsed data into unified inventory.
+
+    Cognos models data in layered namespaces: an "Import View" that mirrors the
+    physical tables, a "Model View" that wraps them for reuse, and a "DMR View"
+    holding the dimensional/OLAP layer. Only Import View query subjects map to
+    real tables; the others are views over them. Emitting all three as tables
+    would triple the table count and create joins between an object and its own
+    wrapper, so the physical layer is preferred and Model View subjects are only
+    used when they have no Import View counterpart.
+    """
+    from ..cognos import analysis as cognos_analysis
+    from ..cognos import expressions as cognos_expr
+    from ..cognos import rls as cognos_rls
+    from ..cognos.classifier import (
+        classify_cognos_expression,
+        classify_query_subject,
+    )
+
+    sf_db = inv["snowflake_target"]["database"]
+
+    # Prefer the physical layer. Fall back to the model layer for subjects that
+    # exist only there.
+    by_name: dict[str, dict] = {}
+    for qs in parsed.get("query_subjects", []):
+        name = qs.get("name", "")
+        if not name:
+            continue
+        existing = by_name.get(name)
+        if existing is None or (
+            existing.get("namespace") != "Import View"
+            and qs.get("namespace") == "Import View"
+        ):
+            by_name[name] = qs
+
+    # Tables
+    for name, qs in by_name.items():
+        physical = qs.get("physical_object") or name
+        inv["tables"].append(
+            {
+                "name": name,
+                "physical_name": physical,
+                "database": sf_db,
+                # The Cognos data source alias carries the schema in this model
+                # family; the loader maps alias -> schema explicitly rather than
+                # guessing, so it is passed through verbatim.
+                "source_alias": qs.get("source_alias", "") or qs.get("data_source", ""),
+                "description": f"Cognos query subject {name}"
+                + (f" ({qs.get('table_type')})" if qs.get("table_type") else ""),
+                "source_view": qs.get("namespace", ""),
+                "complexity": classify_query_subject(qs),
+                "is_passthrough": qs.get("is_passthrough", False),
+                "sql": qs.get("sql", ""),
+                "status": qs.get("status", ""),
+            }
+        )
+
+        # Query items -> dimensions or facts, by Cognos's own usage declaration.
+        for item in qs.get("items", []):
+            complexity = classify_cognos_expression(item.get("expression", ""))
+            norm = _normalize_item(
+                name=item.get("name", ""),
+                expr=item.get("expression") or item.get("external_name") or item.get("name", ""),
+                data_type=item.get("data_type", "VARCHAR"),
+                table=name,
+                description=item.get("description", ""),
+                complexity=complexity,
+                original=item,
+                source_view=qs.get("namespace", ""),
+                source_file=parsed.get("source_file", ""),
+            )
+            # Cognos declares usage per item: fact (measure), identifier (key),
+            # attribute (descriptive). Trusting the declaration beats inferring
+            # from the name -- INVENTORY_ITEM_ID is declared an identifier and
+            # would otherwise be classified a metric by any _id/_amount heuristic.
+            if item.get("usage") == "fact":
+                inv["facts"].append(norm)
+            else:
+                inv["dimensions"].append(norm)
+
+            if complexity == "manual_required":
+                inv["flagged"].append(
+                    {
+                        "name": item.get("name", ""),
+                        "table": name,
+                        "reason": "Cognos expression has no direct scalar equivalent",
+                        "expression": item.get("expression", ""),
+                    }
+                )
+
+    # Relationships
+    for rel in parsed.get("relationships", []):
+        left = rel.get("left", {})
+        right = rel.get("right", {})
+        cols = rel.get("join_columns", [])
+        inv["relationships"].append(
+            {
+                "name": rel.get("name", ""),
+                "left_table": left.get("entity", ""),
+                "right_table": right.get("entity", ""),
+                "left_column": cols[0] if cols else "",
+                "right_column": cols[1] if len(cols) > 1 else (cols[0] if cols else ""),
+                "condition": rel.get("expression", ""),
+                "cardinality": f"{left.get('cardinality', '')}-to-{right.get('cardinality', '')}",
+                # Framework Manager's own validity flag, carried through as
+                # metadata. Never used to drop a relationship: it goes stale
+                # independently of whether the join predicate is sound.
+                "source_status": rel.get("status", ""),
+                "is_simple_equality": rel.get("is_simple_equality", False),
+            }
+        )
+
+    # Calculations -> metrics, with relative-time windows resolved to SQL.
+    for calc in parsed.get("calculations", []):
+        expr = calc.get("expression", "")
+        if not expr:
+            # Empty calculation bodies exist in the source model. Record them as
+            # flagged rather than emitting a metric with no definition.
+            inv["flagged"].append(
+                {
+                    "name": calc.get("name", ""),
+                    "table": "",
+                    "reason": "calculation has an empty expression in the source Cognos model",
+                    "expression": "",
+                }
+            )
+            continue
+
+        translated = cognos_expr.translate_relative_time_calculation(
+            expr, measure="{measure}", date_column="{date_column}"
+        )
+        if translated["kind"] in ("change", "growth", "rate", "single"):
+            complexity = "needs_translation"
+        elif translated["kind"] == "needs_fiscal_calendar":
+            complexity = "needs_translation"
+        else:
+            complexity = classify_cognos_expression(expr)
+
+        inv["metrics"].append(
+            _normalize_item(
+                name=calc.get("canonical_name") or calc.get("name", ""),
+                # Templated on {measure}/{date_column}: one Cognos calculation
+                # becomes one pattern applicable to either fact table, rather
+                # than being bound to whichever fact it happened to reference.
+                expr=translated["expr"] or expr,
+                data_type="NUMBER",
+                table="",
+                description=(
+                    f"Cognos calculation '{calc.get('name', '')}'"
+                    + (
+                        f" (fiscal-year clone of {calc.get('canonical_name')})"
+                        if calc.get("fiscal_year_clone")
+                        else ""
+                    )
+                ),
+                complexity=complexity,
+                original={
+                    **calc,
+                    "translation": translated,
+                },
+                source_view=calc.get("namespace", ""),
+                source_file=parsed.get("source_file", ""),
+            )
+        )
+        if translated["kind"] == "needs_fiscal_calendar":
+            inv["flagged"].append(
+                {
+                    "name": calc.get("name", ""),
+                    "table": "",
+                    "reason": (
+                        "depends on the fiscal calendar; must bind to fiscal "
+                        "columns in the date dimension, not a date offset"
+                    ),
+                    "expression": expr,
+                }
+            )
+
+    # The four extended concepts.
+    inv["grain_declarations"] = cognos_analysis.extract_grain_declarations(parsed)
+    inv["aggregation_rules"] = cognos_analysis.extract_aggregation_rules(parsed)
+    inv["hierarchies"] = cognos_analysis.extract_hierarchies(parsed)
+    inv["security_rules"] = cognos_rls.derive_security_rules(parsed)
+
+    # Model-level analysis, kept alongside the inventory so a consumer does not
+    # have to re-derive it from the raw parse.
+    inv["source_analysis"] = {
+        "model_name": parsed.get("model_name", ""),
+        "clones": cognos_analysis.analyze_clones(parsed),
+        "data_sources": cognos_analysis.audit_data_sources(parsed),
+        "security_summary": cognos_rls.summarize_security(parsed),
+        "element_counts": parsed.get("element_counts", {}),
+    }
+
+    for f in parsed.get("filters", []):
+        inv["filters"].append(
+            {
+                "name": f.get("name", ""),
+                "expression": f.get("expression", ""),
+                "source_view": f.get("namespace", ""),
+            }
+        )
 
 
 # ---------------------------------------------------------------------------

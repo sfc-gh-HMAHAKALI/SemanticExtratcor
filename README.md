@@ -1,12 +1,12 @@
 # Semantic Extraction Utility
 
-**v0.6.0** — A Cortex Code skill for extracting semantic definitions from **Tableau**, **Looker**, **Power BI**, **Denodo**, and **SAP Business Objects**, producing professional assessment reports, and converting them to **Snowflake Semantic View YAML**.
+**v0.7.0** — A Cortex Code skill for extracting semantic definitions from **Tableau**, **Looker**, **Power BI**, **Denodo**, **SAP Business Objects**, and **IBM Cognos Framework Manager**, producing professional assessment reports, and converting them to **Snowflake Semantic View YAML**.
 
 ## What It Does
 
 This utility extracts, classifies, and reports on semantic definitions from BI tools:
 
-1. **Parse** source files — `.pbit`, `.pbip`, `.bim` (Power BI), `.lkml` (Looker), `.twb`/`.tds`/`.twbx` (Tableau), `.vql` (Denodo), `.json` (Business Objects)
+1. **Parse** source files — `.pbit`, `.pbip`, `.bim` (Power BI), `.lkml` (Looker), `.twb`/`.tds`/`.twbx` (Tableau), `.vql` (Denodo), `.json` (Business Objects), `model.xml`/`.cpf` (Cognos Framework Manager), `model.xml`/`.cpf` (Cognos Framework Manager)
 2. **Classify** every field as `simple` (auto-convertible), `needs_translation` (known SQL equivalent), or `manual_required` (requires human attention)
 3. **Analyze** dashboard pages for overlap, purpose, and consolidation opportunities
 4. **Generate** a branded HTML executive report + 5-tab Excel workbook — the customer-facing deliverable
@@ -15,7 +15,7 @@ This utility extracts, classifies, and reports on semantic definitions from BI t
 
 ### Relationship to Snowflake Semantic View Autopilot
 
-Snowflake's Semantic View Autopilot can ingest Tableau `.twb`/`.tds`/`.twbx` files directly in Snowsight — but it is manual (one workbook at a time), does not support Looker, Power BI, Denodo, or Business Objects, and does not produce an audit/mapping artifact.
+Snowflake's Semantic View Autopilot can ingest Tableau `.twb`/`.tds`/`.twbx` files directly in Snowsight — but it is manual (one workbook at a time), does not support Looker, Power BI, Denodo, Business Objects, or Cognos, and does not produce an audit/mapping artifact.
 
 This skill **complements** Autopilot:
 
@@ -196,6 +196,8 @@ report <input.json> [options]
 | `tableau` | `.twb`, `.tds`, `.twbx` | Extracts dashboard field usage |
 | `denodo` | `.vql` | Requires `CREATE OR REPLACE VIEW` statements |
 | `businessobjects` | `.json` (businessLayer format) | From starschema extractor |
+| `cognos` | `model.xml`, `.cpf`, or project directory | Framework Manager project export. Streamed with `iterparse`: an 18MB / 57k-reference model parses in ~2s at under 100MB RSS |
+| `cognos` | `model.xml`, `.cpf`, or project directory | Framework Manager project export. Streamed with `iterparse`: an 18MB / 57k-reference model parses in ~2s at <100MB RSS |
 
 ## Interactive Workflow (via SKILL.md)
 
